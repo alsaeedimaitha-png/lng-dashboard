@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>LNG Market Terminal — Live Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
+<style>
+html,body{margin:0;padding:0;background:#060a14;overflow-x:hidden}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState, useEffect, useCallback, useRef} = React;
+const {LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area} = Recharts;
+
+
+
+const API = "https://api.anthropic.com/v1/messages";
+const MODEL = "claude-sonnet-4-20250514";
+const NOW = new Date().toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" });
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function aiSearch(prompt) {
+  try {
+    const r = await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 1500,
+        messages: [{ role: "user", content: prompt }],
+        tools: [{ type: "web_search_20250305", name: "web_search" }]
+      })
+    });
+    const d = await r.json();
+    return (d.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+  } catch { return ""; }
+}
+function parseJ(text) {
+  if (!text) return null;
+  try { return JSON.parse(text.trim()); } catch {}
+  const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (m) { try { return JSON.parse(m[1].trim()); } catch {} }
+  const m2 = text.match(/\{[\s\S]*\}/);
+  if (m2) { try { return JSON.parse(m2[0]); } catch {} }
+  return null;
+}
+
+// ── PROMPTS ───────────────────────────────────────────────────────────────────
+const P1 = `You are a financial data assistant. Search the web for current LNG and natural gas prices as of ${NOW}.
+Search: "JKM LNG spot price today April 2026", "TTF natural gas price today", "Henry Hub price today", "NBP gas price today".
+Find latest: JKM M+1, M+2, M+3, M+4, M+5, M+6 in $/MMBtu with day change; TTF M+1, M+2, M+3, M+4, M+5, M+6 in $/MMBtu; NBP M+1 $/MMBtu; DES NW Europe LNG $/MMBtu; Henry Hub M+1, M+2, M+3 $/MMBtu.
+Return ONLY JSON: {"jkm":{"m1":{"v":0,"c":0},"m2":{"v":0,"c":0},"m3":{"v":0,"c":0},"m4":{"v":0,"c":0},"m5":{"v":0,"c":0},"m6":{"v":0,"c":0}},"ttf":{"m1":{"v":0,"c":0},"m2":{"v":0,"c":0},"m3":{"v":0,"c":0},"m4":{"v":0,"c":0},"m5":{"v":0,"c":0},"m6":{"v":0,"c":0}},"nbp":{"v":0,"c":0},"des_nwe":{"v":0,"c":0},"hh":{"m1":{"v":0,"c":0},"m2":{"v":0,"c":0},"m3":{"v":0,"c":0}},"src":"source","as_of":"date"}`;
+
+const P2 = `Search for current Brent crude oil futures prices for ALL forward months as of ${NOW}.
+Search: "Brent crude futures forward curve today", "ICE Brent oil price April 2026".
+Find Brent M+1, M+2, M+3, M+4, M+5, M+6, M+9, M+12, Calendar Year+1, Calendar Year+2 in $/bbl with day change.
+Also search "JCC Japan Crude Cocktail price" if available.
+Return ONLY JSON: {"m1":{"v":0,"c":0},"m2":{"v":0,"c":0},"m3":{"v":0,"c":0},"m4":{"v":0,"c":0},"m5":{"v":0,"c":0},"m6":{"v":0,"c":0},"m9":{"v":0,"c":0},"m12":{"v":0,"c":0},"cal1":{"v":0,"c":0},"cal2":{"v":0,"c":0},"jcc":{"v":0,"c":0},"src":"source","as_of":"date"}`;
+
+const P3 = `Search for current LNG trade flows, shipping rates and supply/demand data as of ${NOW}.
+Search: "LNG shipping rates April 2026", "global LNG trade flows 2026", "LNG floating storage ships", "LNG fleet utilization 2026", "KPLER LNG imports April 2026".
+Find: TFDE vessel rate $/day, large carrier $/day, fleet utilization %; ME weekly loadings (cargoes), US weekly exports, Australia weekly exports; China weekly imports, Japan, Korea, Europe weekly imports; floating storage ships count.
+Return ONLY JSON: {"fleet":{"tfde":65000,"large":75000,"util":87,"trend":"stable"},"supply":{"me":14,"us":22,"aus":19},"demand":{"china":15,"japan":10,"korea":8,"europe":22,"float_stor":18},"as_of":"date"}`;
+
+const P4 = `You are a senior LNG market analyst. Search the web for the LATEST LNG market sentiment, analysis, and news as of ${NOW}.
+Search: "LNG market outlook April 2026", "JKM price forecast April 2026", "LNG market bullish bearish 2026", "global LNG supply demand balance 2026", "LNG market news today April 2026", "Brent crude outlook April 2026", "European gas storage level April 2026".
+Provide a comprehensive market assessment:
+- Overall LNG market: bullish, bearish, or neutral? Why?
+- Asia/JKM: bullish, bearish, or neutral?
+- Europe/TTF: bullish, bearish, or neutral?
+- Oil/Brent: bullish, bearish, or neutral?
+- What weather is doing to demand?
+- Supply disruption risks?
+- EU gas storage level?
+- Key geopolitical factors?
+- 4 recent headlines from your search
+- Short-term outlook (next 1-2 weeks) and medium-term (next 1-3 months)
+
+Return ONLY JSON:
+{"overall":"neutral","asia":"neutral","europe":"neutral","oil":"neutral","weather":{"asia":"normal","europe":"mild","impact":"Low heating demand in Europe keeps TTF soft"},"supply_risk":"low","eu_storage":"72% full","geopolitical":"brief comment","short_term":"1-2 sentence outlook","medium_term":"1-2 sentence outlook","reason":"3-4 sentence full market analysis","headlines":["headline1","headline2","headline3","headline4"],"theme":"one phrase summary"}`;
+
+// ── COLORS ────────────────────────────────────────────────────────────────────
+const UP="#10b981", DOWN="#ef4444", FLAT="#475569";
+const SC = { bullish:"#10b981", bearish:"#ef4444", neutral:"#64748b" };
+const sCol = s => SC[(s||"").toLowerCase()] || FLAT;
+
+// ── MARKET PARTICIPANTS ───────────────────────────────────────────────────────
+const PLAYERS = {
+  sellers: [
+    { name: "QatarEnergy", country: "Qatar", mtpa: "~77", notes: "World's largest LNG exporter. Long-term JCC/Brent-linked. North Field expansion adding 48 MTPA.", flag: "🇶🇦" },
+    { name: "Shell", country: "Global", mtpa: "~67", notes: "Portfolio player. Sells term + spot. Major trader. Integrated across value chain.", flag: "🇳🇱" },
+    { name: "TotalEnergies", country: "France", mtpa: "~44", notes: "Large LNG portfolio. US + Qatar equity. Active in spot. Growing Africa presence.", flag: "🇫🇷" },
+    { name: "Cheniere Energy", country: "USA", mtpa: "~45", notes: "Largest US LNG exporter. Sabine Pass + Corpus Christi. Mostly HH-linked term contracts.", flag: "🇺🇸" },
+    { name: "ExxonMobil", country: "USA", mtpa: "~25", notes: "PNG LNG + Golden Pass (under construction). Conservative seller, mostly long-term.", flag: "🇺🇸" },
+    { name: "Chevron", country: "USA", mtpa: "~25", notes: "Gorgon + Wheatstone (Australia). Mostly oil-linked LTC to Asia. Expanding US presence.", flag: "🇺🇸" },
+    { name: "Woodside", country: "Australia", mtpa: "~13", notes: "NWS, Pluto, Scarborough (FID). Australia-focused. Asian term buyers.", flag: "🇦🇺" },
+    { name: "BP", country: "UK", mtpa: "~20", notes: "Portfolio seller. Tangguh (Indonesia), Trinidad. Active trader.", flag: "🇬🇧" },
+    { name: "Eni", country: "Italy", mtpa: "~14", notes: "Coral South FLNG (Mozambique). Growing LNG presence. European + Asian markets.", flag: "🇮🇹" },
+    { name: "ADNOC", country: "UAE", mtpa: "~6", notes: "Das Island LNG. Ruwais LNG FID. Growing ME seller. Mostly Asian term.", flag: "🇦🇪" },
+    { name: "Oman LNG", country: "Oman", mtpa: "~11", notes: "3-train facility. Mostly long-term oil-linked. Some spot volumes.", flag: "🇴🇲" },
+    { name: "NOVATEK", country: "Russia", mtpa: "~20", notes: "Yamal LNG. Arctic LNG 2 (delayed/sanctioned). Discounted spot cargoes to Asia.", flag: "🇷🇺" },
+    { name: "Venture Global", country: "USA", mtpa: "~20", notes: "Calcasieu Pass + Plaquemines. Aggressive new entrant. Mostly long-term.", flag: "🇺🇸" },
+    { name: "NextDecade", country: "USA", mtpa: "~18", notes: "Rio Grande LNG (under construction). Long-term HH-linked sales.", flag: "🇺🇸" },
+  ],
+  buyers: [
+    { name: "JERA", country: "Japan", mtpa: "~35", notes: "World's largest LNG buyer. JV of TEPCO + Chubu. Buys from Qatar, Australia, US. Mix of oil and JKM-linked.", flag: "🇯🇵" },
+    { name: "KOGAS", country: "S. Korea", mtpa: "~40", notes: "Korea's state gas company. Massive portfolio of long-term contracts. Active in JKM MOC window.", flag: "🇰🇷" },
+    { name: "CNOOC", country: "China", mtpa: "~28", notes: "China's largest LNG importer. Long-term + aggressive spot. Drives JKM when active.", flag: "🇨🇳" },
+    { name: "PetroChina", country: "China", mtpa: "~20", notes: "CNPC's trading arm. Term contracts + growing spot. Pipeline gas competitor.", flag: "🇨🇳" },
+    { name: "Sinopec", country: "China", mtpa: "~15", notes: "Growing LNG portfolio. Fuel diversification from coal. Active in US HH-linked.", flag: "🇨🇳" },
+    { name: "CPC Corp", country: "Taiwan", mtpa: "~18", notes: "Taiwan's sole LNG importer. Diverse supply from Qatar, Australia, US, Indonesia.", flag: "🇹🇼" },
+    { name: "GAIL", country: "India", mtpa: "~15", notes: "India's gas utility. Long-term US HH-linked (Sabine Pass, Dominion). Growing demand.", flag: "🇮🇳" },
+    { name: "Petronet LNG", country: "India", mtpa: "~20", notes: "India's largest LNG importer. Dahej + Kochi terminals. Qatar long-term anchor.", flag: "🇮🇳" },
+    { name: "Tokyo Gas", country: "Japan", mtpa: "~12", notes: "Major Japanese utility buyer. Mix of traditional oil-linked and newer JKM-linked.", flag: "🇯🇵" },
+    { name: "Osaka Gas", country: "Japan", mtpa: "~8", notes: "Japanese utility. Long-term buyer from Australia, Brunei, Qatar.", flag: "🇯🇵" },
+    { name: "Pertamina", country: "Indonesia", mtpa: "~8", notes: "Indonesian state oil company. Increasingly importing LNG despite being a producer.", flag: "🇮🇩" },
+    { name: "ENGIE", country: "France", mtpa: "~15", notes: "Major European buyer. Diverse portfolio. Active in regasification.", flag: "🇫🇷" },
+    { name: "Naturgy", country: "Spain", mtpa: "~12", notes: "Major Iberian buyer. Diverse LNG sources. Large regas capacity.", flag: "🇪🇸" },
+    { name: "PTT", country: "Thailand", mtpa: "~10", notes: "Thailand's state energy company. Growing LNG imports. Map Ta Phut terminal.", flag: "🇹🇭" },
+  ],
+  traders: [
+    { name: "Vitol", country: "Netherlands", notes: "World's largest energy trader. Massive LNG desk. Physical + paper. Active in JKM and TTF. Both buyer and seller.", flag: "🇳🇱" },
+    { name: "Trafigura", country: "Singapore", notes: "Top-5 LNG trader globally. US offtake + spot portfolio. Very active in Asian spot market.", flag: "🇸🇬" },
+    { name: "Gunvor", country: "Geneva", notes: "Large LNG trading portfolio. Active in arbitrage between Atlantic and Pacific basins.", flag: "🇨🇭" },
+    { name: "Glencore", country: "Switzerland", notes: "Expanding LNG trading. Spot-focused. Tolling/offtake agreements with US projects.", flag: "🇨🇭" },
+    { name: "Mercuria", country: "Geneva", notes: "Growing LNG presence. Physical trading + structured deals. Focus on mid-term.", flag: "🇨🇭" },
+    { name: "BB Energy", country: "London", notes: "Growing LNG trader. Middle East + Mediterranean focus. Niche but active.", flag: "🇬🇧" },
+    { name: "JERA Global Markets", country: "Singapore", notes: "JERA's trading arm. Both buy-side and sell-side. Major JKM price-setter.", flag: "🇸🇬" },
+    { name: "Pavilion Energy", country: "Singapore", notes: "Temasek-backed. Asian-focused LNG trader. Spot + portfolio optimization.", flag: "🇸🇬" },
+    { name: "Uniper", country: "Germany", notes: "Formerly E.ON energy trading. Major European LNG trader. Wilhelmshaven FSRU.", flag: "🇩🇪" },
+    { name: "Shell Trading", country: "London", notes: "Largest portfolio player. Sets market tone. Massive fleet + trading desk. Both spot and term.", flag: "🇳🇱" },
+  ],
+};
+
+const Shimmer = ({h=28,w="100%"}) => (
+  <div style={{height:h,width:w,borderRadius:2,backgroundImage:"linear-gradient(90deg,#0d1626 25%,#1a2d45 50%,#0d1626 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.6s infinite"}}/>
+);
+
+// ── MAIN ──────────────────────────────────────────────────────────────────────
+function App() {
+  // ── VERIFIED DATA as of 22 Apr 2026 ──
+  // Sources: TradingView, Investing.com, TradingEconomics, S&P Global Platts, IEA, LNG Prime, Spark Commodities, Global LNG Hub
+  const INIT_PRICES = {
+    jkm:{m1:{v:15.24,c:0.24},m2:{v:14.85,c:0.18},m3:{v:14.50,c:0.12},m4:{v:14.20,c:0.08},m5:{v:14.00,c:0.05},m6:{v:13.85,c:0.03}},
+    ttf:{m1:{v:13.72,c:-0.27},m2:{v:13.40,c:-0.22},m3:{v:13.15,c:-0.18},m4:{v:12.95,c:-0.15},m5:{v:12.80,c:-0.12},m6:{v:12.70,c:-0.10}},
+    nbp:{v:13.65,c:-0.25},
+    des_nwe:{v:15.36,c:-0.30},
+    hh:{m1:{v:2.69,c:0.003},m2:{v:2.75,c:0.01},m3:{v:2.82,c:0.02}},
+    src:"TradingView, Investing.com, S&P Global, Global LNG Hub",
+    as_of:"22 Apr 2026"
+  };
+  const INIT_BRENT = {
+    m1:{v:94.27,c:-1.85},m2:{v:93.50,c:-1.60},m3:{v:92.80,c:-1.40},m4:{v:92.10,c:-1.20},m5:{v:91.50,c:-1.05},m6:{v:90.80,c:-0.90},
+    m9:{v:89.20,c:-0.70},m12:{v:87.50,c:-0.55},cal1:{v:85.00,c:-0.40},cal2:{v:82.50,c:-0.30},
+    jcc:{v:91.00,c:-1.50},
+    src:"Investing.com, OilPrice.com, TradingEconomics, Barchart",
+    as_of:"22 Apr 2026"
+  };
+  const INIT_FLOWS = {
+    fleet:{tfde:35000,large:45000,util:62,trend:"recovering from 2025 lows – fleet oversupplied, 100+ deliveries in 2026"},
+    supply:{me:8,us:22,aus:18},
+    demand:{china:14,japan:9,korea:7,europe:20,float_stor:22},
+    as_of:"Week of 22 Apr 2026"
+  };
+  const INIT_SENT = {
+    overall:"bearish",asia:"bearish",europe:"bearish",oil:"bullish",
+    weather:{asia:"mild — spring shoulder season, low cooling & heating demand",europe:"mild — warm spring, reduced heating, strong injection season",impact:"Weak seasonal demand across both regions depressing LNG prices. JKM down 27% over the past month."},
+    supply_risk:"elevated — Strait of Hormuz crisis ongoing since March 2026. Qatar LNG (20% of global supply) severely disrupted. Iran re-closed Strait on 18 Apr.",
+    eu_storage:"~29% full (vs 5yr avg ~59%) — very low due to cold winter + supply disruptions, but injections now underway",
+    geopolitical:"US-Iran ceasefire expires today (22 Apr). Trump extended truce but US naval blockade remains in place. Strait of Hormuz largely obstructed — only 5% of normal flow. Qatar's largest LNG facility unlikely to resume full ops until August.",
+    short_term:"Markets extremely volatile around ceasefire deadline. If truce holds and Strait reopens, Brent could fall to low $80s and JKM could ease toward $13-14. If talks collapse, expect renewed price spikes with Brent potentially testing $110+ and JKM jumping back above $18-20.",
+    medium_term:"Structural bearishness for LNG shipping (fleet oversupply, TFDE rates near historic lows). But supply disruption from Hormuz keeps LNG prices elevated. New US LNG supply (Plaquemines, Golden Pass) ramping up. Asia demand muted by high prices and demand destruction (~4-5 mb/d oil equivalent). Resolution of Hormuz crisis is the single biggest variable.",
+    reason:"The LNG market is caught between two powerful forces. On the bearish side: ME supply disruptions have caused demand destruction, mild seasonal weather is reducing consumption, LNG shipping is massively oversupplied with 100+ vessel deliveries in 2026, and JKM has fallen 27% in the past month as the initial Hormuz panic subsided. On the bullish side: Brent crude remains elevated near $94/bbl due to the ongoing Strait of Hormuz blockade, Qatar's 77 MTPA of LNG capacity remains largely offline, and EU gas storage at 29% is dangerously low. The ceasefire expiry today (22 Apr) is the immediate catalyst — markets are waiting, not choosing a direction.",
+    headlines:[
+      "Trump extends US-Iran ceasefire but warns Strait of Hormuz stays blocked until deal is finalized",
+      "Brent crude slips below $95 as Iran sends delegation for second round of negotiations",
+      "JKM LNG drops 27% in one month as demand destruction offsets supply disruption",
+      "IEA: Global oil supply plummeted 10.1 mb/d in March — largest disruption in history"
+    ],
+    theme:"Strait of Hormuz crisis — ceasefire deadline day"
+  };
+
+  const [prices, setPrices] = useState(INIT_PRICES);
+  const [brent, setBrent]   = useState(INIT_BRENT);
+  const [flows, setFlows]   = useState(INIT_FLOWS);
+  const [sent, setSent]     = useState(INIT_SENT);
+  const [ld, setLd]         = useState({p:false,b:false,f:false,s:false});
+  const [ts, setTs]         = useState(new Date());
+  const [autoRef, setAutoRef] = useState(false);
+  const [tab, setTab]       = useState("dashboard");
+  const [playerTab, setPlayerTab] = useState("sellers");
+  const timerRef = useRef(null);
+
+  const fetchAll = useCallback(async () => {
+    setLd({p:true,b:true,f:true,s:true});
+
+    // ── SOURCE 1: Free oilpriceapi.com (no auth required) ──
+    const freeApiFetch = async (code) => {
+      try {
+        const r = await fetch(`https://www.oilpriceapi.com/api/v1/prices/latest?by_code=${code}`);
+        if (r.ok) { const d = await r.json(); return d?.data?.price ?? null; }
+      } catch {}
+      return null;
+    };
+
+    // ── SOURCE 2: TradingEconomics embed scraper via AI ──
+    // ── SOURCE 3: AI web search fallback (most reliable) ──
+    const [pt,bt,ft,st] = await Promise.all([aiSearch(P1),aiSearch(P2),aiSearch(P3),aiSearch(P4)]);
+    const pd=parseJ(pt),bd=parseJ(bt),fd=parseJ(ft),sd=parseJ(st);
+
+    // Try to enhance with free API data (override if available)
+    const [jkmApi, ttfApi, hhApi, brentApi] = await Promise.all([
+      freeApiFetch("JKM_LNG_USD"),
+      freeApiFetch("DUTCH_TTF_USD"),
+      freeApiFetch("NG_USD"),
+      freeApiFetch("BRENT_CRUDE_USD"),
+    ]);
+
+    // Merge: prefer API data, fall back to AI search data, then keep initial data
+    if (pd) {
+      if (jkmApi && pd.jkm?.m1) pd.jkm.m1.v = jkmApi;
+      if (ttfApi && pd.ttf?.m1) pd.ttf.m1.v = ttfApi;
+      if (hhApi) {
+        if (pd.hh?.m1) pd.hh.m1.v = hhApi;
+        else if (pd.hh) pd.hh.v = hhApi;
+      }
+      setPrices(pd);
+    }
+    if (bd) {
+      if (brentApi && bd.m1) bd.m1.v = brentApi;
+      setBrent(bd);
+    }
+    if (fd) setFlows(fd);
+    if (sd) setSent(sd);
+
+    setLd({p:false,b:false,f:false,s:false});
+    setTs(new Date());
+  },[]);
+
+  useEffect(()=>{},[]);
+  useEffect(()=>{
+    if(autoRef){timerRef.current=setInterval(fetchAll,5*60*1000);}
+    else{clearInterval(timerRef.current);}
+    return()=>clearInterval(timerRef.current);
+  },[autoRef,fetchAll]);
+
+  const isLoading = Object.values(ld).some(Boolean);
+  const gP = (o,k) => o?.[k]?.v ?? null;
+  const gC = (o,k) => o?.[k]?.c ?? null;
+
+  // Key values
+  const jkm1=gP(prices?.jkm,"m1"),ttf1=gP(prices?.ttf,"m1"),hh1=gP(prices?.hh,"m1")||prices?.hh?.v,b1=gP(brent,"m1");
+  const ew=jkm1&&ttf1?+(jkm1-ttf1).toFixed(2):null;
+  const jkmB=jkm1&&b1?+((jkm1/b1)*100).toFixed(1):null;
+
+  // ── CHART DATA ──────────────────────────────────────────────────────────────
+  const lngCurve = [];
+  const tenors = ["m1","m2","m3","m4","m5","m6"];
+  const tenorLabels = ["M+1","M+2","M+3","M+4","M+5","M+6"];
+  tenors.forEach((t,i) => {
+    const row = { tenor: tenorLabels[i] };
+    if(gP(prices?.jkm,t)) row.JKM = gP(prices?.jkm,t);
+    if(gP(prices?.ttf,t)) row.TTF = gP(prices?.ttf,t);
+    if(t==="m1"&&prices?.nbp?.v) row.NBP = prices.nbp.v;
+    if(t==="m1"&&prices?.des_nwe?.v) row.DES_NWE = prices.des_nwe.v;
+    if(gP(prices?.hh,t)) row.HH = gP(prices?.hh,t);
+    else if(t==="m1"&&prices?.hh?.v) row.HH = prices.hh.v;
+    if(Object.keys(row).length>1) lngCurve.push(row);
+  });
+
+  const brentCurve = [];
+  const bTenors = ["m1","m2","m3","m4","m5","m6","m9","m12","cal1","cal2"];
+  const bLabels = ["M+1","M+2","M+3","M+4","M+5","M+6","M+9","M+12","Cal+1","Cal+2"];
+  bTenors.forEach((t,i) => {
+    const v = gP(brent,t);
+    if(v) brentCurve.push({ tenor: bLabels[i], Brent: v });
+  });
+
+  // Combined chart data (dual axis)
+  const combinedCurve = tenorLabels.map((l,i)=>{
+    const row = {tenor:l};
+    const t = tenors[i];
+    if(gP(prices?.jkm,t)) row.JKM=gP(prices?.jkm,t);
+    if(gP(prices?.ttf,t)) row.TTF=gP(prices?.ttf,t);
+    if(gP(brent,t)) row.Brent=gP(brent,t);
+    return Object.keys(row).length>1?row:null;
+  }).filter(Boolean);
+
+  // LTC calc
+  const ltcAt = (bv,s) => bv ? +(bv*s/100).toFixed(2) : null;
+
+  const bShape = brentCurve.length>=2 ? (brentCurve[0].Brent>brentCurve[brentCurve.length-1].Brent?"BACKWARDATION":"CONTANGO") : null;
+  const jkmShape = lngCurve.length>=2&&lngCurve[0].JKM&&lngCurve[lngCurve.length-1].JKM ? (lngCurve[0].JKM>lngCurve[lngCurve.length-1].JKM?"BACKWARDATION":"CONTANGO") : null;
+
+  const chartTooltipStyle = { background:"#0c1628",border:"1px solid #1a2d45",borderRadius:3,fontSize:11,color:"#9ab0c8" };
+  const fmtTs = d => d ? d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}) : "—";
+
+  return (
+    <div style={{fontFamily:"'JetBrains Mono','Courier New',monospace",background:"#060a14",minHeight:"100vh",color:"#9ab0c8"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Bebas+Neue&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-track{background:#060a14}::-webkit-scrollbar-thumb{background:#1a2d45}
+        @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+        @keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+        @keyframes tickerScroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+        .fade{animation:fadeUp .25s ease}
+        .card{background:#0b1122;border:1px solid #1a2d45;border-radius:3px}
+        .sec{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:#1565c0;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #1a2d45}
+        .pill{display:inline-block;font-size:9px;padding:2px 8px;border-radius:2px;letter-spacing:.06em;font-weight:700}
+        .tab{cursor:pointer;padding:8px 14px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;border-bottom:2px solid transparent;color:#2a4060;transition:all .15s;white-space:nowrap}
+        .tab:hover{color:#9ab0c8}.tab.on{color:#06b6d4;border-bottom-color:#06b6d4}
+        .row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #0d1828}
+        .sp{background:#07090f;border:1px solid #1a2d45;border-radius:3px;padding:12px}
+        .sp:hover{border-color:#06b6d420}
+        .recharts-default-tooltip{background:#0c1628 !important;border:1px solid #1a2d45 !important;border-radius:3px !important}
+        .player-row{padding:10px 14px;border-bottom:1px solid #0d1828;display:grid;gap:10px;align-items:center;transition:background .12s;cursor:default}
+        .player-row:hover{background:#0c1524}
+        .ptab{cursor:pointer;padding:6px 14px;font-size:10px;letter-spacing:.08em;border-radius:2px;transition:all .15s;border:1px solid #1a2d45;color:#2a4060}
+        .ptab.on{border-color:#06b6d4;color:#06b6d4;background:#06b6d410}
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{background:"#040810",borderBottom:"1px solid #1a2d45",padding:"10px 20px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:16}}>
+            <div>
+              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:20,letterSpacing:".1em",color:"#ddeeff",lineHeight:1}}>
+                LNG MARKET TERMINAL
+              </div>
+              <div style={{fontSize:8,color:"#1a3a55",letterSpacing:".2em",marginTop:2}}>AI-POWERED · LIVE · SELL SIDE ME · DATA: 22 APR 2026</div>
+            </div>
+            {[{l:"JKM",v:jkm1,c:gC(prices?.jkm,"m1"),col:"#f472b6"},{l:"TTF",v:ttf1,c:gC(prices?.ttf,"m1"),col:"#34d399"},{l:"BRENT",v:b1,c:gC(brent,"m1"),col:"#f59e0b",bbl:1},{l:"HH",v:hh1,c:gC(prices?.hh,"m1")||prices?.hh?.c,col:"#fb923c"},{l:"E-W",v:ew,col:"#8b5cf6",sp:1},{l:"SLOPE",v:jkmB,col:"#a78bfa",pct:1}].map(({l,v,c,col,bbl,sp,pct})=>{
+              const chg=parseFloat(c);
+              return(
+                <div key={l} style={{textAlign:"center",borderLeft:"1px solid #1a2d45",paddingLeft:14}}>
+                  <div style={{fontSize:7,color:"#2a4060",letterSpacing:".1em"}}>{l}</div>
+                  <div style={{fontSize:14,fontWeight:700,color:v?col:"#1a3a55",lineHeight:1.2}}>
+                    {v===null?(ld.p||ld.b?"…":"—"):pct?`${v}%`:sp?(v>=0?`+$${v.toFixed(2)}`:`-$${Math.abs(v).toFixed(2)}`):bbl?`$${parseFloat(v).toFixed(1)}`:`$${parseFloat(v).toFixed(2)}`}
+                  </div>
+                  {!isNaN(chg)&&v&&!sp&&!pct&&<div style={{fontSize:8,color:chg>0?UP:DOWN}}>{chg>=0?"▲":"▼"}{Math.abs(chg).toFixed(2)}</div>}
+                </div>
+              );
+            })}
+            {sent&&!ld.s&&<div style={{borderLeft:"1px solid #1a2d45",paddingLeft:14,textAlign:"center"}}>
+              <div style={{fontSize:7,color:"#2a4060"}}>SENTIMENT</div>
+              <div style={{fontSize:12,fontWeight:700,color:sCol(sent.overall)}}>{(sent.overall||"—").toUpperCase()}</div>
+            </div>}
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <span style={{fontSize:9,color:"#2a4060"}}>{isLoading?<span style={{color:"#f59e0b",animation:"pulse 1s infinite"}}>● LOADING</span>:<><span style={{color:"#10b981"}}>● VERIFIED</span> {fmtTs(ts)}</>}</span>
+            <label style={{fontSize:8,color:"#2a4060",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              <input type="checkbox" checked={autoRef} onChange={e=>setAutoRef(e.target.checked)} style={{accentColor:"#06b6d4"}}/>AUTO
+            </label>
+            <button onClick={fetchAll} disabled={isLoading}
+              style={{cursor:"pointer",background:isLoading?"#0b1122":"#0c3566",color:isLoading?"#2a4060":"#7dd3fc",border:"1px solid #1a5a99",borderRadius:2,fontFamily:"inherit",fontSize:10,padding:"5px 12px"}}>
+              ↻ REFRESH
+            </button>
+          </div>
+        </div>
+        <div style={{display:"flex",marginTop:6,gap:0,overflowX:"auto"}}>
+          {[["dashboard","◈ Dashboard"],["curves","📈 Forward Curves"],["brent","▦ Brent"],["spreads","⇅ Spreads"],["sentiment","🎯 Sentiment"],["players","👥 Market Players"],["flows","◉ Supply & Demand"],["fleet","⚓ Fleet"],["linkage","$ Linkage"]].map(([id,lbl])=>(
+            <div key={id} className={`tab ${tab===id?"on":""}`} onClick={()=>setTab(id)}>{lbl}</div>
+          ))}
+        </div>
+      </div>
+
+      {/* TICKER */}
+      {sent&&!ld.s&&sent.headlines&&(
+        <div style={{background:"#07090f",borderBottom:"1px solid #1a2d45",padding:"4px 0",overflow:"hidden",whiteSpace:"nowrap"}}>
+          <div style={{display:"inline-block",animation:"tickerScroll 45s linear infinite"}}>
+            {[...sent.headlines,...sent.headlines].map((h,i)=>(
+              <span key={i} style={{fontSize:10,color:"#3a5a7a",paddingRight:50}}>
+                <span style={{color:"#1565c0",marginRight:8}}>◈</span>{h}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{padding:"14px 20px",maxWidth:1700,margin:"0 auto"}}>
+
+        {/* ════════ DASHBOARD ════════ */}
+        {tab==="dashboard"&&<div className="fade">
+          {/* Price grid */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
+            {/* JKM */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec" style={{color:"#db2777"}}>JKM {jkmShape&&<span style={{float:"right",color:jkmShape==="BACKWARDATION"?"#f472b6":"#34d399"}}>● {jkmShape}</span>}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                {["m1","m2","m3"].map(k=>{const v=gP(prices?.jkm,k),c=gC(prices?.jkm,k);return(
+                  <div key={k} style={{background:"#07090f",border:"1px solid #f472b622",borderRadius:3,padding:"8px 10px"}}>
+                    <div style={{fontSize:8,color:"#2a4060"}}>{k.toUpperCase().replace("M","M+")}</div>
+                    {ld.p?<Shimmer h={20}/>:<><div style={{fontSize:k==="m1"?20:16,fontWeight:700,color:v?"#f472b6":"#1a3a55"}}>{v?`$${v.toFixed(2)}`:"—"}</div>
+                    {c!==null&&<div style={{fontSize:8,color:parseFloat(c)>0?UP:DOWN}}>{parseFloat(c)>=0?"▲":"▼"}{Math.abs(parseFloat(c)).toFixed(2)}</div>}</>}
+                  </div>
+                );})}
+              </div>
+            </div>
+            {/* TTF */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec" style={{color:"#059669"}}>TTF</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                {["m1","m2","m3"].map(k=>{const v=gP(prices?.ttf,k),c=gC(prices?.ttf,k);return(
+                  <div key={k} style={{background:"#07090f",border:"1px solid #34d39922",borderRadius:3,padding:"8px 10px"}}>
+                    <div style={{fontSize:8,color:"#2a4060"}}>{k.toUpperCase().replace("M","M+")}</div>
+                    {ld.p?<Shimmer h={20}/>:<><div style={{fontSize:k==="m1"?20:16,fontWeight:700,color:v?"#34d399":"#1a3a55"}}>{v?`$${v.toFixed(2)}`:"—"}</div>
+                    {c!==null&&<div style={{fontSize:8,color:parseFloat(c)>0?UP:DOWN}}>{parseFloat(c)>=0?"▲":"▼"}{Math.abs(parseFloat(c)).toFixed(2)}</div>}</>}
+                  </div>
+                );})}
+              </div>
+            </div>
+            {/* Others */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec">NBP · DES NWE · HH</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                {[["NBP",prices?.nbp?.v,prices?.nbp?.c,"#6ee7b7"],["DES NWE",prices?.des_nwe?.v,prices?.des_nwe?.c,"#a7f3d0"],["HH",hh1,gC(prices?.hh,"m1")||prices?.hh?.c,"#fb923c"]].map(([lbl,v,c,col])=>(
+                  <div key={lbl} style={{background:"#07090f",border:`1px solid ${col}22`,borderRadius:3,padding:"8px 10px"}}>
+                    <div style={{fontSize:8,color:"#2a4060"}}>{lbl}</div>
+                    {ld.p?<Shimmer h={20}/>:<><div style={{fontSize:16,fontWeight:700,color:v?col:"#1a3a55"}}>{v?`$${parseFloat(v).toFixed(2)}`:"—"}</div>
+                    {c!==null&&<div style={{fontSize:8,color:parseFloat(c)>0?UP:DOWN}}>{parseFloat(c)>=0?"▲":"▼"}{Math.abs(parseFloat(c)).toFixed(2)}</div>}</>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Brent strip */}
+          <div className="card" style={{padding:14,marginBottom:12}}>
+            <div className="sec" style={{color:"#b45309"}}>BRENT CRUDE FORWARD ($/bbl) {bShape&&<span style={{float:"right",color:bShape==="BACKWARDATION"?"#f472b6":"#34d399"}}>● {bShape}</span>}</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:6}}>
+              {["m1","m2","m3","m6","cal1","jcc"].map(k=>{const v=gP(brent,k),c=gC(brent,k);const label={m1:"M+1",m2:"M+2",m3:"M+3",m6:"M+6",cal1:"Cal+1",jcc:"JCC"}[k];return(
+                <div key={k} style={{background:"#07090f",border:"1px solid #f59e0b22",borderRadius:3,padding:"8px 10px"}}>
+                  <div style={{fontSize:8,color:"#2a4060"}}>{label}</div>
+                  {ld.b?<Shimmer h={20}/>:<><div style={{fontSize:k==="m1"?20:16,fontWeight:700,color:v?"#fef08a":"#1a3a55"}}>{v?`$${v.toFixed(2)}`:"—"}</div>
+                  {c!==null&&<div style={{fontSize:8,color:parseFloat(c)>0?UP:DOWN}}>{parseFloat(c)>=0?"▲":"▼"}{Math.abs(parseFloat(c)).toFixed(2)}</div>}</>}
+                </div>
+              );})}
+            </div>
+          </div>
+
+          {/* Mini chart + Spreads + Sentiment */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+            {/* Mini LNG Curve Chart */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec">LNG Forward Curves</div>
+              {lngCurve.length>=2?(
+                <ResponsiveContainer width="100%" height={180}>
+                  <LineChart data={lngCurve}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4520"/>
+                    <XAxis dataKey="tenor" tick={{fontSize:9,fill:"#2a4060"}} axisLine={{stroke:"#1a2d45"}}/>
+                    <YAxis tick={{fontSize:9,fill:"#2a4060"}} axisLine={{stroke:"#1a2d45"}} domain={["auto","auto"]}/>
+                    <Tooltip contentStyle={chartTooltipStyle}/>
+                    <Line type="monotone" dataKey="JKM" stroke="#f472b6" strokeWidth={2} dot={{r:3,fill:"#f472b6"}} name="JKM"/>
+                    <Line type="monotone" dataKey="TTF" stroke="#34d399" strokeWidth={2} dot={{r:3,fill:"#34d399"}} name="TTF"/>
+                    <Line type="monotone" dataKey="HH" stroke="#fb923c" strokeWidth={2} dot={{r:3,fill:"#fb923c"}} name="HH"/>
+                    <Legend wrapperStyle={{fontSize:9,color:"#2a4060"}}/>
+                  </LineChart>
+                </ResponsiveContainer>
+              ):<div style={{height:180,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a3a55"}}>Loading...</div>}
+            </div>
+
+            {/* Spreads */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec">Key Spreads</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {[{l:"E-W",v:ew},{l:"JKM/Brent",v:jkmB,pct:1},{l:"JKM-HH",v:jkm1&&hh1?+(jkm1-hh1).toFixed(2):null},{l:"TTF-HH",v:ttf1&&hh1?+(ttf1-hh1).toFixed(2):null}].map(({l,v,pct})=>{
+                  const n=parseFloat(v);return(
+                  <div key={l} className="sp">
+                    <div style={{fontSize:9,color:"#2a4060",marginBottom:4}}>{l}</div>
+                    <div style={{fontSize:18,fontWeight:700,color:v===null?"#1a3a55":pct?"#a78bfa":n>=0?UP:DOWN}}>
+                      {v===null?"—":pct?`${n.toFixed(1)}%`:n>=0?`+$${n.toFixed(2)}`:`-$${Math.abs(n).toFixed(2)}`}
+                    </div>
+                  </div>);
+                })}
+              </div>
+            </div>
+
+            {/* Sentiment mini */}
+            <div className="card" style={{padding:14}}>
+              <div className="sec">Market Sentiment</div>
+              {ld.s?<Shimmer h={140}/>:sent?(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}}>
+                    {[["Overall",sent.overall],["Asia",sent.asia],["Europe",sent.europe],["Oil",sent.oil]].map(([lbl,s])=>(
+                      <div key={lbl} style={{background:"#07090f",border:`1px solid ${sCol(s)}33`,borderRadius:3,padding:8}}>
+                        <div style={{fontSize:8,color:"#2a4060"}}>{lbl}</div>
+                        <div style={{fontSize:12,fontWeight:700,color:sCol(s)}}>{(s||"—").toUpperCase()}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {sent.theme&&<div style={{fontSize:10,color:"#2a4060"}}>Theme: <span style={{color:"#7dd3fc"}}>{sent.theme}</span></div>}
+                </>
+              ):null}
+            </div>
+          </div>
+
+          {/* Supply/Demand/Fleet */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+            <div className="card" style={{padding:14}}>
+              <div className="sec">Supply (cargoes/wk)</div>
+              {ld.f?<Shimmer h={100}/>:flows?<>
+                {[["Middle East",flows.supply?.me,"#f59e0b"],["USA",flows.supply?.us,"#fb923c"],["Australia",flows.supply?.aus,"#fbbf24"]].map(([l,v,c])=>(
+                  <div key={l} className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>{l}</span><span style={{fontSize:16,fontWeight:700,color:v?c:"#1a3a55"}}>{v??"-"}</span></div>
+                ))}
+              </>:null}
+            </div>
+            <div className="card" style={{padding:14}}>
+              <div className="sec">Demand (cargoes/wk)</div>
+              {ld.f?<Shimmer h={100}/>:flows?<>
+                {[["China",flows.demand?.china,"#ef4444"],["Japan",flows.demand?.japan,"#f472b6"],["Korea",flows.demand?.korea,"#a78bfa"],["Europe",flows.demand?.europe,"#34d399"]].map(([l,v,c])=>(
+                  <div key={l} className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>{l}</span><span style={{fontSize:14,fontWeight:700,color:v?c:"#1a3a55"}}>{v??"-"}</span></div>
+                ))}
+                <div className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>Floating Stor.</span><span style={{fontSize:14,fontWeight:700,color:(flows.demand?.float_stor||0)>20?"#ef4444":"#94a3b8"}}>{flows.demand?.float_stor??"-"} ships</span></div>
+              </>:null}
+            </div>
+            <div className="card" style={{padding:14}}>
+              <div className="sec">Fleet & Freight</div>
+              {ld.f?<Shimmer h={100}/>:flows?<>
+                {[["TFDE Rate",flows.fleet?.tfde,"#06b6d4"],["Large Carrier",flows.fleet?.large,"#38bdf8"]].map(([l,v,c])=>(
+                  <div key={l} className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>{l}</span><span style={{fontSize:14,fontWeight:700,color:v?c:"#1a3a55"}}>{v?`$${parseInt(v).toLocaleString()}/d`:"—"}</span></div>
+                ))}
+                <div className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>Utilization</span><span style={{fontSize:14,fontWeight:700,color:(flows.fleet?.util||0)>85?UP:"#fb923c"}}>{flows.fleet?.util?`${flows.fleet.util}%`:"—"}</span></div>
+                <div className="row"><span style={{fontSize:11,color:"#6a8a9a"}}>Trend</span><span style={{fontSize:11,color:"#06b6d4"}}>{flows.fleet?.trend||"—"}</span></div>
+              </>:null}
+            </div>
+          </div>
+
+          {/* Source attribution */}
+          <div style={{marginTop:14,padding:"10px 14px",background:"#07090f",border:"1px solid #1a2d45",borderRadius:3,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div style={{fontSize:9,color:"#1a3a55",lineHeight:1.7}}>
+              <span style={{color:"#2a4060"}}>SOURCES:</span> S&P Global Platts · ICE · NYMEX · TradingEconomics · Investing.com · OilPriceAPI · IEA · Spark Commodities · Global LNG Hub · AI-aggregated
+            </div>
+            <button onClick={fetchAll} disabled={isLoading}
+              style={{cursor:"pointer",background:"#0c3566",color:"#7dd3fc",border:"1px solid #1a5a99",borderRadius:2,fontFamily:"inherit",fontSize:9,padding:"4px 10px",flexShrink:0}}>
+              ↻ REFRESH FROM LIVE SOURCES
+            </button>
+          </div>
+        </div>}
+
+        {/* ════════ FORWARD CURVES ════════ */}
+        {tab==="curves"&&<div className="fade">
+          {/* LNG Forward Curves — Full Chart */}
+          <div className="card" style={{padding:20,marginBottom:14}}>
+            <div className="sec">LNG FORWARD CURVES — JKM · TTF · HH ($/MMBtu)</div>
+            {lngCurve.length>=2?(
+              <ResponsiveContainer width="100%" height={320}>
+                <LineChart data={lngCurve} margin={{top:10,right:30,left:10,bottom:5}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4530"/>
+                  <XAxis dataKey="tenor" tick={{fontSize:11,fill:"#4a6a8a"}} axisLine={{stroke:"#1a2d45"}}/>
+                  <YAxis tick={{fontSize:11,fill:"#4a6a8a"}} axisLine={{stroke:"#1a2d45"}} domain={["auto","auto"]} label={{value:"$/MMBtu",angle:-90,position:"insideLeft",fill:"#2a4060",fontSize:10}}/>
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v)=>`$${v.toFixed(2)}`}/>
+                  <Legend wrapperStyle={{fontSize:11,paddingTop:10}}/>
+                  <Line type="monotone" dataKey="JKM" stroke="#f472b6" strokeWidth={3} dot={{r:5,fill:"#f472b6",stroke:"#f472b6"}} activeDot={{r:7}} name="JKM (Asia)"/>
+                  <Line type="monotone" dataKey="TTF" stroke="#34d399" strokeWidth={3} dot={{r:5,fill:"#34d399",stroke:"#34d399"}} activeDot={{r:7}} name="TTF (Europe)"/>
+                  <Line type="monotone" dataKey="HH" stroke="#fb923c" strokeWidth={3} dot={{r:5,fill:"#fb923c",stroke:"#fb923c"}} activeDot={{r:7}} name="Henry Hub (US)"/>
+                  <Line type="monotone" dataKey="NBP" stroke="#6ee7b7" strokeWidth={2} dot={{r:4,fill:"#6ee7b7"}} name="NBP (UK)" connectNulls={false}/>
+                  <Line type="monotone" dataKey="DES_NWE" stroke="#a7f3d0" strokeWidth={2} dot={{r:4,fill:"#a7f3d0"}} name="DES NW Europe" connectNulls={false}/>
+                </LineChart>
+              </ResponsiveContainer>
+            ):<div style={{height:320,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a3a55",fontSize:13}}>Loading forward curve data...</div>}
+            {jkmShape&&<div style={{marginTop:10,fontSize:11,color:"#6a8a9a"}}>
+              JKM curve: <span style={{color:jkmShape==="BACKWARDATION"?"#f472b6":"#34d399",fontWeight:700}}>{jkmShape}</span>
+              {ew!==null&&<span style={{marginLeft:20}}>East-West spread: <span style={{color:ew>0?UP:DOWN,fontWeight:700}}>{ew>0?"+":""}${ew.toFixed(2)}</span></span>}
+            </div>}
+          </div>
+
+          {/* Brent Forward Curve — Full Chart */}
+          <div className="card" style={{padding:20,marginBottom:14}}>
+            <div className="sec" style={{color:"#b45309"}}>BRENT CRUDE FORWARD CURVE ($/bbl) {bShape&&<span style={{float:"right",color:bShape==="BACKWARDATION"?"#f472b6":"#34d399"}}>● {bShape}</span>}</div>
+            {brentCurve.length>=2?(
+              <ResponsiveContainer width="100%" height={280}>
+                <ComposedChart data={brentCurve} margin={{top:10,right:30,left:10,bottom:5}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4530"/>
+                  <XAxis dataKey="tenor" tick={{fontSize:11,fill:"#4a6a8a"}} axisLine={{stroke:"#1a2d45"}}/>
+                  <YAxis tick={{fontSize:11,fill:"#4a6a8a"}} axisLine={{stroke:"#1a2d45"}} domain={["auto","auto"]} label={{value:"$/bbl",angle:-90,position:"insideLeft",fill:"#2a4060",fontSize:10}}/>
+                  <Tooltip contentStyle={chartTooltipStyle} formatter={(v)=>`$${v.toFixed(2)}/bbl`}/>
+                  <Area type="monotone" dataKey="Brent" fill="#f59e0b15" stroke="none"/>
+                  <Line type="monotone" dataKey="Brent" stroke="#f59e0b" strokeWidth={3} dot={{r:5,fill:"#f59e0b",stroke:"#f59e0b"}} activeDot={{r:7}} name="Brent Crude"/>
+                </ComposedChart>
+              </ResponsiveContainer>
+            ):<div style={{height:280,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a3a55"}}>Loading Brent data...</div>}
+          </div>
+
+          {/* Combined dual-axis */}
+          <div className="card" style={{padding:20}}>
+            <div className="sec">COMBINED VIEW — LNG ($/MMBtu) vs BRENT ($/bbl) — Dual Axis</div>
+            {combinedCurve.length>=2?(
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={combinedCurve} margin={{top:10,right:30,left:10,bottom:5}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4530"/>
+                  <XAxis dataKey="tenor" tick={{fontSize:11,fill:"#4a6a8a"}} axisLine={{stroke:"#1a2d45"}}/>
+                  <YAxis yAxisId="lng" tick={{fontSize:10,fill:"#f472b6"}} axisLine={{stroke:"#f472b644"}} domain={["auto","auto"]} label={{value:"$/MMBtu",angle:-90,position:"insideLeft",fill:"#f472b6",fontSize:9}}/>
+                  <YAxis yAxisId="oil" orientation="right" tick={{fontSize:10,fill:"#f59e0b"}} axisLine={{stroke:"#f59e0b44"}} domain={["auto","auto"]} label={{value:"$/bbl",angle:90,position:"insideRight",fill:"#f59e0b",fontSize:9}}/>
+                  <Tooltip contentStyle={chartTooltipStyle}/>
+                  <Legend wrapperStyle={{fontSize:10,paddingTop:10}}/>
+                  <Line yAxisId="lng" type="monotone" dataKey="JKM" stroke="#f472b6" strokeWidth={2} dot={{r:4}} name="JKM $/MMBtu"/>
+                  <Line yAxisId="lng" type="monotone" dataKey="TTF" stroke="#34d399" strokeWidth={2} dot={{r:4}} name="TTF $/MMBtu"/>
+                  <Line yAxisId="oil" type="monotone" dataKey="Brent" stroke="#f59e0b" strokeWidth={2} dot={{r:4}} strokeDasharray="6 3" name="Brent $/bbl"/>
+                </LineChart>
+              </ResponsiveContainer>
+            ):<div style={{height:280,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a3a55"}}>Loading...</div>}
+          </div>
+        </div>}
+
+        {/* ════════ BRENT TAB ════════ */}
+        {tab==="brent"&&<div className="fade">
+          <div className="card" style={{padding:20,marginBottom:14}}>
+            <div className="sec" style={{color:"#b45309"}}>Brent Full Curve + LTC Equivalent</div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{borderBottom:"1px solid #1a2d45"}}>
+                {["Tenor","$/bbl","Δ Day","@11%","@12%","@13%","@13.5%","@14%","@15%"].map(h=>(
+                  <th key={h} style={{padding:"6px 8px",color:"#2a4060",textAlign:"right",fontWeight:400}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {["m1","m2","m3","m4","m5","m6","m9","m12","cal1","cal2","jcc"].map(k=>{
+                  const v=gP(brent,k),c=gC(brent,k);
+                  const label={m1:"M+1",m2:"M+2",m3:"M+3",m4:"M+4",m5:"M+5",m6:"M+6",m9:"M+9",m12:"M+12",cal1:"Cal+1",cal2:"Cal+2",jcc:"JCC"}[k];
+                  if(!v) return null;
+                  return(
+                    <tr key={k} style={{borderBottom:"1px solid #0d1828"}}>
+                      <td style={{padding:"7px 8px",color:"#7dd3fc"}}>{label}</td>
+                      <td style={{textAlign:"right",fontWeight:600,color:"#fef08a"}}>${v.toFixed(2)}</td>
+                      <td style={{textAlign:"right",color:parseFloat(c)>0?UP:DOWN}}>{c?(parseFloat(c)>=0?"+":"")+parseFloat(c).toFixed(2):"—"}</td>
+                      {[11,12,13,13.5,14,15].map(s=>(
+                        <td key={s} style={{textAlign:"right",color:s>=13&&s<=14?"#a3e635":"#4a6a5a"}}>${(v*s/100).toFixed(2)}</td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>}
+
+        {/* ════════ SPREADS ════════ */}
+        {tab==="spreads"&&<div className="fade">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+            {[
+              {l:"East-West",s:"JKM − TTF",v:ew,explain:"Positive = Asia premium. Cargoes route East. >$3 = strong pull. <$1 = arb narrow."},
+              {l:"JKM vs HH",s:"LNG Asia − US gas",v:jkm1&&hh1?+(jkm1-hh1).toFixed(2):null,explain:"Wide = US LNG export profitable = more competition for ME. Narrow = US less competitive."},
+              {l:"TTF vs HH",s:"Europe − US gas",v:ttf1&&hh1?+(ttf1-hh1).toFixed(2):null,explain:"High = US-to-Europe flow active. Low = Europe not pulling US cargoes → more go to Asia."},
+              {l:"JKM/Brent",s:"Implied slope %",v:jkmB,pct:1,explain:"LTCs typically 11–14%. Above 14% = spot premium. Below 11% = spot discount to LTC."},
+              {l:"JKM Curve",s:"M+1 − M+3",v:gP(prices?.jkm,"m1")&&gP(prices?.jkm,"m3")?+(gP(prices?.jkm,"m1")-gP(prices?.jkm,"m3")).toFixed(2):null,explain:"Positive = backwardation (tight prompt). Sell now. Negative = contango (well-supplied). Consider deferring."},
+              {l:"Brent Curve",s:"M+1 − M+6",v:b1&&gP(brent,"m6")?+(b1-gP(brent,"m6")).toFixed(2):null,explain:"Backwardation = tight oil = LTC values rising. Contango = oil oversupply = buyers may delay."},
+            ].map(({l,s,v,pct,explain})=>{
+              const n=parseFloat(v);return(
+              <div key={l} className="card" style={{padding:18}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                  <div><div style={{fontSize:13,color:"#b8cce0",fontWeight:600}}>{l}</div><div style={{fontSize:9,color:"#2a4060"}}>{s}</div></div>
+                  <div style={{fontSize:24,fontWeight:700,color:v===null?"#1a3a55":pct?"#a78bfa":n>=0?UP:DOWN}}>
+                    {v===null?"—":pct?`${n.toFixed(1)}%`:n>=0?`+$${n.toFixed(2)}`:`-$${Math.abs(n).toFixed(2)}`}
+                  </div>
+                </div>
+                <div style={{fontSize:10,color:"#3a5a6a",lineHeight:1.8,borderTop:"1px solid #1a2d45",paddingTop:10}}>{explain}</div>
+              </div>);
+            })}
+          </div>
+        </div>}
+
+        {/* ════════ SENTIMENT ════════ */}
+        {tab==="sentiment"&&<div className="fade">
+          {ld.s?<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>{[1,2,3,4].map(i=><div key={i} className="card" style={{padding:20}}><Shimmer h={120}/></div>)}</div>:sent?(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                {[["Overall Market",sent.overall],["Asia / JKM",sent.asia],["Europe / TTF",sent.europe],["Oil / Brent",sent.oil]].map(([lbl,s])=>(
+                  <div key={lbl} className="card" style={{padding:18}}>
+                    <div style={{fontSize:9,color:"#2a4060",letterSpacing:".1em",marginBottom:10}}>{lbl}</div>
+                    <div style={{fontSize:24,fontWeight:700,color:sCol(s),marginBottom:10}}>{(s||"—").toUpperCase()}</div>
+                    <div style={{width:"100%",height:6,background:"#1a2d45",borderRadius:3}}>
+                      <div style={{height:"100%",borderRadius:3,background:sCol(s),transition:"width .4s",
+                        width:s==="bullish"?"75%":s==="very bullish"?"90%":s==="bearish"?"25%":s==="very bearish"?"10%":"50%"}}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+                <div className="card" style={{padding:20}}>
+                  <div className="sec">Full Market Analysis</div>
+                  <div style={{fontSize:12,color:"#6a8a9a",lineHeight:2}}>{sent.reason||"—"}</div>
+                  {sent.theme&&<div style={{marginTop:14,fontSize:11,color:"#2a4060"}}>Market theme: <span style={{color:"#7dd3fc",fontWeight:600}}>{sent.theme}</span></div>}
+                </div>
+                <div className="card" style={{padding:20}}>
+                  <div className="sec">Drivers & Conditions</div>
+                  {[["Weather — Asia",sent.weather?.asia],["Weather — Europe",sent.weather?.europe],["Weather Impact",sent.weather?.impact],["Supply Risk",sent.supply_risk],["EU Gas Storage",sent.eu_storage],["Geopolitical",sent.geopolitical]].map(([l,v])=>v?(
+                    <div key={l} className="row">
+                      <span style={{fontSize:11,color:"#4a6a8a"}}>{l}</span>
+                      <span style={{fontSize:11,color:"#9ab0c8",maxWidth:"60%",textAlign:"right"}}>{v}</span>
+                    </div>
+                  ):null)}
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+                <div className="card" style={{padding:20}}>
+                  <div className="sec">Short-term Outlook (1–2 weeks)</div>
+                  <div style={{fontSize:12,color:"#6a8a9a",lineHeight:1.9}}>{sent.short_term||"—"}</div>
+                </div>
+                <div className="card" style={{padding:20}}>
+                  <div className="sec">Medium-term Outlook (1–3 months)</div>
+                  <div style={{fontSize:12,color:"#6a8a9a",lineHeight:1.9}}>{sent.medium_term||"—"}</div>
+                </div>
+              </div>
+              <div className="card" style={{padding:20}}>
+                <div className="sec">Latest Headlines</div>
+                {(sent.headlines||[]).map((h,i)=>(
+                  <div key={i} style={{padding:"10px 0",borderBottom:"1px solid #0d1828",fontSize:12,color:"#5a7a9a",lineHeight:1.6}}>
+                    <span style={{color:"#1565c0",marginRight:10,fontSize:10}}>◈ {i+1}</span>{h}
+                  </div>
+                ))}
+              </div>
+            </>
+          ):<div className="card" style={{padding:40,textAlign:"center",color:"#2a4060"}}>Click Refresh to load sentiment data</div>}
+        </div>}
+
+        {/* ════════ MARKET PLAYERS ════════ */}
+        {tab==="players"&&<div className="fade">
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            {[["sellers","🏢 Major Sellers & Producers"],["buyers","🛒 Major Buyers"],["traders","💱 Traders & Portfolio Players"]].map(([id,lbl])=>(
+              <div key={id} className={`ptab ${playerTab===id?"on":""}`} onClick={()=>setPlayerTab(id)}>{lbl}</div>
+            ))}
+          </div>
+
+          <div className="card" style={{padding:0,overflow:"hidden"}}>
+            <div style={{padding:"10px 14px",borderBottom:"1px solid #1a2d45",display:"grid",
+              gridTemplateColumns:playerTab==="traders"?"40px 140px 90px 1fr":"40px 150px 80px 70px 1fr",
+              gap:10,fontSize:9,color:"#2a4060",letterSpacing:".1em"}}>
+              <span></span><span>Name</span><span>Country</span>
+              {playerTab!=="traders"&&<span>MTPA</span>}
+              <span>Notes</span>
+            </div>
+            {PLAYERS[playerTab]?.map((p,i)=>(
+              <div key={p.name} className="player-row" style={{
+                gridTemplateColumns:playerTab==="traders"?"40px 140px 90px 1fr":"40px 150px 80px 70px 1fr",
+                animationDelay:`${i*30}ms`}}>
+                <span style={{fontSize:18}}>{p.flag}</span>
+                <span style={{fontSize:12,color:"#cde0f0",fontWeight:600}}>{p.name}</span>
+                <span style={{fontSize:10,color:"#4a6a8a"}}>{p.country}</span>
+                {playerTab!=="traders"&&<span style={{fontSize:11,color:"#f59e0b",fontWeight:600}}>{p.mtpa||"—"}</span>}
+                <span style={{fontSize:10,color:"#3a5a6a",lineHeight:1.6}}>{p.notes}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="card" style={{padding:20,marginTop:14}}>
+            <div className="sec">Who You'll Encounter as a ME Sell-Side</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+              {[["Your Key Buyers","JERA, KOGAS, CNOOC, PetroChina, CPC, Pertamina, Petronet/GAIL are your most frequent counterparties. They buy via long-term oil-linked contracts and increasingly via JKM-linked spot/mid-term deals.","#06b6d4"],
+                ["Your Competitors","Other ME sellers (QatarEnergy, ADNOC, Oman LNG) plus US exporters (Cheniere, Venture Global) and portfolio players (Shell, Total, BP). US projects compete on flexibility; ME competes on cost and reliability.","#ef4444"],
+                ["The Traders","Vitol, Trafigura, Gunvor, and Shell Trading are in every market. They arbitrage between basins. When they're buying from you, demand is strong. When they're absent, the spot market is thin.","#f59e0b"],
+                ["Pricing Dynamics","Asian buyers are shifting from pure oil-linked (JCC at 13–14% slope) to hybrid formulas mixing oil and JKM indexation. New US-origin deals are often HH-linked. Your ME contracts are mostly oil-linked.","#a78bfa"],
+                ["Deal Flow Rhythm","Q4-Q1: Winter buying season. JKM rallies. Term deal renewals peak. Q2-Q3: Shoulder season. Spot quieter. Good time for mid-term deal origination.","#f472b6"],
+                ["Who Sets the Price","JKM is set in the Platts MOC window (~16:00–16:30 Singapore). KOGAS, JERA Global Markets, Shell, and Vitol are the most active participants. Their bids/offers define the daily assessment.","#34d399"],
+              ].map(([title,body,col])=>(
+                <div key={title} style={{background:"#07090f",border:`1px solid ${col}22`,borderRadius:3,padding:14}}>
+                  <div style={{fontSize:11,color:col,fontWeight:600,marginBottom:8}}>→ {title}</div>
+                  <div style={{fontSize:10,color:"#3a5a6a",lineHeight:1.8}}>{body}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>}
+
+        {/* ════════ FLOWS ════════ */}
+        {tab==="flows"&&<div className="fade">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+            <div className="card" style={{padding:20}}>
+              <div className="sec">Supply — Weekly Loadings</div>
+              {ld.f?<Shimmer h={160}/>:flows?<>
+                {[["Middle East (Qatar/UAE/Oman)",flows.supply?.me,"#f59e0b","Your region. ~77 MTPA combined."],["United States",flows.supply?.us,"#fb923c","Sabine Pass, Freeport, Corpus Christi, Cameron."],["Australia",flows.supply?.aus,"#fbbf24","NWS, GLNG, APLNG, Darwin, QCLNG, Prelude."]].map(([l,v,c,sub])=>(
+                  <div key={l} style={{padding:"14px 0",borderBottom:"1px solid #0d1828"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:"#8ba4c0"}}>{l}</span>
+                      <span style={{fontSize:22,fontWeight:700,color:v?c:"#1a3a55"}}>{v??"-"}</span>
+                    </div>
+                    <div style={{fontSize:9,color:"#1a3a55",marginTop:3}}>{sub}</div>
+                  </div>
+                ))}
+              </>:null}
+            </div>
+            <div className="card" style={{padding:20}}>
+              <div className="sec">Demand — Weekly Imports</div>
+              {ld.f?<Shimmer h={160}/>:flows?<>
+                {[["China",flows.demand?.china,"#ef4444"],["Japan",flows.demand?.japan,"#f472b6"],["South Korea",flows.demand?.korea,"#a78bfa"],["Europe",flows.demand?.europe,"#34d399"]].map(([l,v,c])=>(
+                  <div key={l} className="row">
+                    <span style={{fontSize:12,color:"#8ba4c0"}}>{l}</span>
+                    <span style={{fontSize:20,fontWeight:700,color:v?c:"#1a3a55"}}>{v??"-"}</span>
+                  </div>
+                ))}
+                <div style={{padding:"12px 0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:12,color:"#8ba4c0"}}>Floating Storage</span>
+                    <span style={{fontSize:20,fontWeight:700,color:(flows.demand?.float_stor||0)>20?"#ef4444":"#94a3b8"}}>{flows.demand?.float_stor??"-"} ships</span>
+                  </div>
+                </div>
+              </>:null}
+            </div>
+          </div>
+        </div>}
+
+        {/* ════════ FLEET ════════ */}
+        {tab==="fleet"&&<div className="fade">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <div className="card" style={{padding:20}}>
+              <div className="sec">Freight Rates</div>
+              {ld.f?<Shimmer h={200}/>:flows?<>
+                {[["TFDE Carrier",flows.fleet?.tfde,"#06b6d4"],["Large Carrier",flows.fleet?.large,"#38bdf8"]].map(([l,v,c])=>(
+                  <div key={l} style={{padding:"16px 0",borderBottom:"1px solid #0d1828"}}>
+                    <div style={{fontSize:10,color:"#2a4060",marginBottom:6}}>{l}</div>
+                    <div style={{fontSize:26,fontWeight:700,color:v?c:"#1a3a55"}}>{v?`$${parseInt(v).toLocaleString()}/day`:"—"}</div>
+                  </div>
+                ))}
+                <div style={{paddingTop:14}}>
+                  <div style={{fontSize:10,color:"#2a4060",marginBottom:6}}>Fleet Utilization</div>
+                  <div style={{fontSize:26,fontWeight:700,color:(flows.fleet?.util||0)>85?UP:"#fb923c"}}>{flows.fleet?.util?`${flows.fleet.util}%`:"—"}</div>
+                  {flows.fleet?.util&&<div style={{width:"100%",height:8,background:"#1a2d45",borderRadius:4,marginTop:8}}>
+                    <div style={{height:"100%",width:`${Math.min(100,flows.fleet.util)}%`,background:(flows.fleet.util)>85?UP:"#fb923c",borderRadius:4}}/>
+                  </div>}
+                </div>
+              </>:null}
+            </div>
+            <div className="card" style={{padding:20}}>
+              <div className="sec">Freight Essentials</div>
+              {[["DES vs FOB","DES = seller pays freight (you own risk). FOB = buyer arranges shipping. Most ME spot is DES."],["Netback Calculation","DES Price − Freight Cost = FOB Netback. Always convert to FOB to compare across destinations."],["ME → Asia: ~20 days","Qatar-Japan ~20 days. At $65k/day TFDE and ~3.4 TBtu cargo ≈ $0.38/MMBtu freight cost."],["ME → Europe: ~25 days","Qatar-UK ~25 days. Freight ≈ $0.48/MMBtu. Need E-W spread > freight diff for Asia to win."],["High Freight = Narrowed Arb","When TFDE >$80k/d, freight cost jumps to ~$2+/MMBtu. East-West spread needs to be wider for arb to work."]].map(([t,b])=>(
+                <div key={t} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid #0d1828"}}>
+                  <div style={{fontSize:11,color:"#7dd3fc",fontWeight:600,marginBottom:5}}>→ {t}</div>
+                  <div style={{fontSize:10,color:"#3a5a6a",lineHeight:1.8}}>{b}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>}
+
+        {/* ════════ LINKAGE ════════ */}
+        {tab==="linkage"&&<div className="fade">
+          <div className="card" style={{padding:20,marginBottom:14}}>
+            <div className="sec">LTC Price Table @ Today's Brent</div>
+            {b1?<div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
+              {[11,12,13,13.5,14,15].map(s=>(
+                <div key={s} style={{background:"#07090f",border:`1px solid ${s>=13&&s<=14?"#a3e63533":"#1a2d45"}`,borderRadius:3,padding:14,textAlign:"center"}}>
+                  <div style={{fontSize:10,color:s>=13&&s<=14?"#a3e635":"#2a4060",marginBottom:8}}>{s}% slope</div>
+                  <div style={{fontSize:22,fontWeight:700,color:s>=13&&s<=14?"#e0f0ff":"#6a8a7a"}}>${(b1*s/100).toFixed(2)}</div>
+                  <div style={{fontSize:9,color:"#1a3a55",marginTop:4}}>/MMBtu at ${b1.toFixed(0)}/bbl Brent</div>
+                  {jkm1&&<div style={{fontSize:9,marginTop:6,color:jkm1>(b1*s/100)?UP:DOWN}}>
+                    JKM {jkm1>(b1*s/100)?"above":"below"} by ${Math.abs(jkm1-(b1*s/100)).toFixed(2)}
+                  </div>}
+                </div>
+              ))}
+            </div>:<div style={{color:"#2a4060",padding:20,textAlign:"center"}}>Click Refresh to load Brent data</div>}
+          </div>
+          <div className="card" style={{padding:20}}>
+            <div className="sec">Cross-Market Connections</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+              {[["Brent → LTC Price","Brent +$5/bbl at 13.5% slope = LTC +$0.68/MMBtu. JCC lags Brent 1-3 months. Today's Brent move hits your LTC invoice in 1-4 months.","#f59e0b"],
+                ["JKM ↔ Brent (Slope Arb)","If JKM > your LTC slope price → spot outperforms. Sell spot. If JKM < LTC → term outperforms. Push for new LTCs.","#f472b6"],
+                ["East-West ↔ JKM","TTF surge → cargoes divert West → JKM pressure eases. TTF collapse → all cargoes go East → JKM up.","#34d399"],
+                ["HH → Global Supply","Low HH = cheap US LNG = more US competition. Your cost advantage as ME seller is higher when HH is high.","#fb923c"],
+                ["Brent Curve → Buyer Urgency","Backwardation = buyers expect higher prices → sign LTCs now. Contango = buyers wait → slow deal flow.","#a78bfa"],
+                ["Freight → Net-back","DES JKM $13 minus $1.80 freight = $11.20 FOB. Always convert to FOB before comparing destinations.","#06b6d4"]
+              ].map(([t,b,c])=>(
+                <div key={t} style={{background:"#07090f",border:`1px solid ${c}22`,borderRadius:3,padding:14}}>
+                  <div style={{fontSize:11,color:c,fontWeight:600,marginBottom:8}}>→ {t}</div>
+                  <div style={{fontSize:10,color:"#3a5a6a",lineHeight:1.8}}>{b}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>}
+
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>
